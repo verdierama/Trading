@@ -25,6 +25,7 @@ import os
 import time
 import math
 import json
+import requests
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(
@@ -79,6 +80,58 @@ def load_standby_list(filepath=STANDBY_FILE):         # ◄◄ NOUVEAU
         )                                             # ◄◄ NOUVEAU
         return set()                                  # ◄◄ NOUVEAU
 
+def load_hyperliquid_positions(account_file="HyperLiquidAccount.txt",
+                               mapping_file="tickers/yahoo_crypto_mapping.json"):
+    """Retourne un set des tickers sur lesquels on est déjà positionné sur Hyperliquide,
+    en appliquant le mapping Yahoo si disponible (ex: GMX -> GMX11857-USD)."""
+    print("load_hyperLiquid with", account_file)
+    if not os.path.exists(account_file):
+        logger.warning(f"Hyperliquid account file not found: {account_file}")
+        return set()
+    
+    with open(account_file, "r") as f:
+        account_address = f.read().strip()
+    
+    # Charger le mapping Yahoo si disponible
+    mapping = {}
+    if os.path.exists(mapping_file):
+        try:
+            with open(mapping_file, "r", encoding="utf-8") as f:
+                mapping = json.load(f)
+        except Exception as e:
+            logger.warning(f"Erreur lecture mapping Yahoo {mapping_file}: {e}")
+    
+    url = "https://api.hyperliquid.xyz/info"
+    payload = {"type": "clearinghouseState", "user": account_address}
+
+    try:
+        resp = requests.post(url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        positions = data.get("assetPositions", [])
+
+        open_positions = set()
+        for p in positions:
+            size = float(p["position"]["szi"])
+            if size != 0:
+                symbol = p["position"]["coin"].upper()
+
+                # Ajouter -USD si nécessaire
+                if not symbol.endswith("-USD"):
+                    symbol_key = symbol + "-USD"
+                else:
+                    symbol_key = symbol
+
+                # Chercher mapping
+                symbol_yahoo = mapping.get(symbol_key, symbol_key).upper()
+                open_positions.add(symbol_yahoo)
+                print("Detected open position:", symbol_yahoo)
+
+        return open_positions
+
+    except Exception as e:
+        logger.warning(f"Erreur récupération positions Hyperliquide: {e}")
+        return set()
 
 # ──────────────────────────────────────────────
 # ADDITIONAL CONDITION CHECK
@@ -343,25 +396,7 @@ class ChannelDetector(object):
 
         H = current_upper - current_lower
 
-        if current_log_price > current_upper:
-            return None
-
         if current_log_price < current_upper - H/4:
-            return None
-
-        close_prices = df["close"].values
-        if len(close_prices) >= 9:
-            ma9 = pd.Series(close_prices).rolling(9).mean().values
-            current_ma9 = np.log(ma9[-1])
-
-            if current_log_price >= current_ma9:
-                return None
-
-            if current_ma9 > current_upper:
-                return None
-            if current_ma9 < current_upper - H/4:
-                return None
-        else:
             return None
 
         containment = 1.0 - violation_ratio
@@ -409,7 +444,6 @@ class ChannelDetector(object):
             "future_n": future_n,
             "num_swing_highs": len(swing_high_idx),
             "num_swing_lows": len(swing_low_idx),
-            "ma9": ma9,
         }
 
 # ──────────────────────────────────────────────
@@ -510,20 +544,6 @@ class ChannelPlotter(object):
             color="#42a5f5", linewidth=1, linestyle=":",
             alpha=0.4, label="Midline"
         )
-
-        ma9 = channel.get("ma9", None)
-        if ma9 is not None:
-            log_ma9 = np.log(
-                pd.Series(df["close"].values).rolling(9).mean().values
-            )
-            ax_price.plot(
-                x_data, log_ma9,
-                color="#FFD700",
-                linewidth=1.5,
-                linestyle="-",
-                alpha=0.8,
-                label="MA9"
-            )
 
         sh = channel["swing_high_idx"]
         sl = channel["swing_low_idx"]
@@ -660,7 +680,6 @@ class ChannelPlotter(object):
         subtitle_text = (
             "Width: {w:.1f}%  |  Position: {p:.0%} ({lbl})  |  "
             "Swing H/L: {sh}/{sl}  |  Timeframe: {tf}  |  "
-            "Price < MA9"
         ).format(
             w=channel["channel_width_pct"],
             p=pos, lbl=pos_label,
@@ -753,12 +772,6 @@ class ChannelPlotter(object):
                 color="dodgerblue", alpha=0.06
             )
 
-            log_ma9 = np.log(
-                pd.Series(df["close"].values).rolling(9).mean().values
-            )
-            ax.plot(x, log_ma9, color="#FFD700", linewidth=1.0,
-                    linestyle="-", alpha=0.8)
-
             sh = channel["swing_high_idx"]
             sl = channel["swing_low_idx"]
             ax.scatter(sh, log_high[sh], marker="v", color="red", s=30, zorder=5)
@@ -838,7 +851,8 @@ class DownChannelScanner(object):
         self.fetcher = DataFetcher(self.config)
         self.detector = ChannelDetector(self.config)
         self.plotter = ChannelPlotter(self.config)
-        self.standby_symbols = load_standby_list()        # ◄◄ NOUVEAU
+        self.standby_symbols = load_standby_list() | load_hyperliquid_positions()        # ◄◄ NOUVEAU
+        print ("stanby + Hyperliquid : ", self.standby_symbols)
 
     def scan(self):
         symbols = self.config.SYMBOLS
