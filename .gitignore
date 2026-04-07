@@ -1,0 +1,8 @@
+# fichiers data
+*.csv
+
+# images générées
+*.png
+
+# dossier plots
+channel_plots/
