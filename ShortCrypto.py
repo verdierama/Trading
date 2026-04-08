@@ -26,6 +26,11 @@ import time
 import math
 import json
 import requests
+import hashlib
+import hmac
+import base64
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(
@@ -132,6 +137,104 @@ def load_hyperliquid_positions(account_file="HyperLiquidAccount.txt",
     except Exception as e:
         logger.warning(f"Erreur récupération positions Hyperliquide: {e}")
         return set()
+
+def load_krakenpro_positions(public_key_file="KrakenFuturePublicKey.txt",
+                              private_key_file="KrakenFuturePrivateKey.txt",
+                              mapping_file="tickers/yahoo_crypto_mapping.json"):
+    """Retourne un set des tickers sur lesquels on est déjà positionné sur Kraken Pro Futures,
+    en appliquant le mapping Yahoo si disponible (ex: PF_BELUSD -> BEL-USD)."""
+    print("load_krakenpro_positions with", public_key_file)
+
+    # --- Check key files exist ---
+    if not os.path.exists(public_key_file):
+        logger.warning(f"Kraken Pro public key file not found: {public_key_file}")
+        return set()
+    if not os.path.exists(private_key_file):
+        logger.warning(f"Kraken Pro private key file not found: {private_key_file}")
+        return set()
+
+    api_key    = open(public_key_file).read().strip()
+    api_secret = open(private_key_file).read().strip()
+
+    # --- Charger le mapping Yahoo si disponible ---
+    mapping = {}
+    if os.path.exists(mapping_file):
+        try:
+            with open(mapping_file, "r", encoding="utf-8") as f:
+                mapping = json.load(f)
+        except Exception as e:
+            logger.warning(f"Erreur lecture mapping Yahoo {mapping_file}: {e}")
+
+    # --- Signature Kraken Futures ---
+    def sign(endpoint, nonce, postdata=""):
+        # ✅ Strip /derivatives prefix for signing only
+        endpoint_to_sign = endpoint.replace("/derivatives", "")
+        message          = postdata + nonce + endpoint_to_sign
+        sha256           = hashlib.sha256(message.encode("utf8")).digest()
+        secret_decoded   = base64.b64decode(api_secret)
+        sig              = hmac.new(secret_decoded, sha256, hashlib.sha512).digest()
+        return base64.b64encode(sig).decode()
+
+    # --- Call /openpositions ---
+    endpoint = "/derivatives/api/v3/openpositions"
+    base_url = "https://futures.kraken.com"
+
+    try:
+        nonce   = str(int(time.time() * 1000))
+        sig     = sign(endpoint, nonce)
+        headers = {
+            "Content-Type" : "application/x-www-form-urlencoded",
+            "Nonce"        : nonce,
+            "APIKey"       : api_key,
+            "Authent"      : sig,
+        }
+
+        resp = requests.get(base_url + endpoint, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("result") != "success":
+            logger.warning(f"Kraken Pro API error: {data.get('error')}")
+            return set()
+
+        positions     = data.get("openPositions", [])
+        open_positions = set()
+
+        for p in positions:
+            size = float(p.get("size", 0))
+            if size == 0:
+                continue
+
+            # PF_BELUSD or PI_XBTUSD -> BELUSD or XBTUSD
+            raw_symbol = p.get("symbol", "").upper()  # e.g. PF_BELUSD
+
+            # Strip prefix PF_ or PI_
+            if "_" in raw_symbol:
+                symbol = raw_symbol.split("_", 1)[1]  # e.g. BELUSD
+            else:
+                symbol = raw_symbol
+
+            # Strip trailing USD to get base asset, then reformat as BASE-USD
+            if symbol.endswith("USD"):
+                base   = symbol[:-3]                  # e.g. BEL
+                symbol_key = base + "-USD"            # e.g. BEL-USD
+            else:
+                symbol_key = symbol + "-USD"
+
+            # Apply Yahoo mapping if available
+            symbol_yahoo = mapping.get(symbol_key, symbol_key).upper()
+            open_positions.add(symbol_yahoo)
+            print(f"Detected open position (Kraken Pro): {symbol_yahoo} "
+                  f"[{raw_symbol} size={size} side={p.get('side')}]")
+
+        return open_positions
+
+    except Exception as e:
+        logger.warning(f"Erreur récupération positions Kraken Pro: {e}")
+        return set()
+
+
+
 
 # ──────────────────────────────────────────────
 # ADDITIONAL CONDITION CHECK
@@ -851,7 +954,7 @@ class DownChannelScanner(object):
         self.fetcher = DataFetcher(self.config)
         self.detector = ChannelDetector(self.config)
         self.plotter = ChannelPlotter(self.config)
-        self.standby_symbols = load_standby_list() | load_hyperliquid_positions()        # ◄◄ NOUVEAU
+        self.standby_symbols = load_standby_list() | load_hyperliquid_positions() | load_krakenpro_positions()       # ◄◄ NOUVEAU
         print ("stanby + Hyperliquid : ", self.standby_symbols)
 
     def scan(self):
