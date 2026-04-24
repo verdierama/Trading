@@ -391,24 +391,35 @@ class ChannelDetector(object):
         return idx
 
     def detect_channel(self, df):
-
-        body_high = np.maximum(df["open"].values, df["close"].values)
+        
+        # ──────────────────────────────────────────────
+        # CORPS des bougies (pour le SUPPORT uniquement)
+        # ──────────────────────────────────────────────
         body_low = np.minimum(df["open"].values, df["close"].values)
-
-        log_body_high = np.log(body_high)
         log_body_low = np.log(body_low)
 
+        # ──────────────────────────────────────────────
+        # MÈCHES hautes (pour la RÉSISTANCE)
+        # ──────────────────────────────────────────────
         log_high = np.log(df["high"].values)
+        
+        # Autres variables
         log_low = np.log(df["low"].values)
         log_close = np.log(df["close"].values)
 
         n = len(df)
         indices = np.arange(n, dtype=float)
 
+        # ──────────────────────────────────────────────
+        # SWING HIGHS : sur les MÈCHES (high)
+        # ──────────────────────────────────────────────
         swing_high_idx, _ = self.find_swing_points(
-            log_body_high, self.config.SWING_ORDER
+            log_high, self.config.SWING_ORDER  # ← MODIFIÉ : mèches
         )
 
+        # ──────────────────────────────────────────────
+        # SWING LOWS : sur les CORPS (inchangé)
+        # ──────────────────────────────────────────────
         _, swing_low_idx = self.find_swing_points(
             log_body_low, self.config.SWING_ORDER
         )
@@ -419,12 +430,15 @@ class ChannelDetector(object):
         if len(swing_low_idx) < self.config.MIN_SWING_POINTS:
             return None
 
+        # ──────────────────────────────────────────────
+        # REFINEMENT : mèches pour highs, corps pour lows
+        # ──────────────────────────────────────────────
         swing_high_idx = self.refine_swing_points(
-            swing_high_idx, log_body_high, "upper"
+            swing_high_idx, log_high, "upper"  # ← MODIFIÉ : mèches
         )
 
         swing_low_idx = self.refine_swing_points(
-            swing_low_idx, log_body_low, "lower"
+            swing_low_idx, log_body_low, "lower"  # Corps (inchangé)
         )
 
         if len(swing_high_idx) < self.config.MIN_SWING_POINTS:
@@ -437,16 +451,16 @@ class ChannelDetector(object):
         first_low = swing_low_idx[0]
 
         if first_low <= first_high:
-
             valid_lows = swing_low_idx[swing_low_idx > first_high]
-
             if len(valid_lows) == 0:
                 return None
-
             swing_low_idx = valid_lows
 
+        # ──────────────────────────────────────────────
+        # FIT RÉSISTANCE : sur les MÈCHES
+        # ──────────────────────────────────────────────
         upper_fit = self.fit_trendline(
-            swing_high_idx, log_body_high[swing_high_idx]
+            swing_high_idx, log_high[swing_high_idx]  # ← MODIFIÉ : mèches
         )
 
         if upper_fit is None:
@@ -460,22 +474,28 @@ class ChannelDetector(object):
 
         m = upper_slope
 
+        # ──────────────────────────────────────────────
+        # FIT SUPPORT : sur les CORPS (inchangé)
+        # ──────────────────────────────────────────────
         support_intercepts = log_body_low[swing_low_idx] - m * swing_low_idx
-
         lower_intercept = np.min(support_intercepts)
-
         lower_slope = m
 
         upper_line = m * indices + upper_intercept
         lower_line = m * indices + lower_intercept
 
-        above_upper = log_body_high > (
-            upper_line + self.config.MAX_DEVIATION
+        # ──────────────────────────────────────────────
+        # VALIDATION CASSURES
+        # ──────────────────────────────────────────────
+        # Cassure haute : vérifier avec les MÈCHES
+        above_upper = log_high > (
+            upper_line + self.config.MAX_DEVIATION  # ← MODIFIÉ : mèches
         )
 
         if np.any(above_upper):
             return None
 
+        # Cassure basse : vérifier avec les CORPS (inchangé)
         below_lower = log_body_low < (
             lower_line - self.config.MAX_DEVIATION
         )
@@ -485,6 +505,9 @@ class ChannelDetector(object):
         if violation_ratio > self.config.MAX_VIOLATION_RATIO:
             return None
 
+        # ──────────────────────────────────────────────
+        # CALCULS DE MÉTRIQUES
+        # ──────────────────────────────────────────────
         channel_width = np.mean(upper_line - lower_line)
 
         if channel_width < self.config.MIN_CHANNEL_WIDTH:
@@ -518,9 +541,7 @@ class ChannelDetector(object):
         decline_100d_pct = (np.exp(log_return_100d) - 1.0) * 100.0
 
         future_n = 20
-
         future_idx = np.arange(n, n + future_n, dtype=float)
-
         future_upper = m * future_idx + upper_intercept
         future_lower = m * future_idx + lower_intercept
 
